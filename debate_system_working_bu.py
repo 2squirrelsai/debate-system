@@ -262,7 +262,6 @@ class DebateSystem:
 def main():
     # You need to set your OpenAI API key
     API_KEY = os.getenv("OPENAI_API_KEY")
-    #API_KEY  = "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"  # For testing purposes, you can set it directly here
     
     if not API_KEY:
         print("Please set your OPENAI_API_KEY environment variable")
