@@ -1,0 +1,221 @@
+import os
+import re
+from openai import OpenAI
+from pydub import AudioSegment
+from pydub.playback import play
+import tempfile
+import io
+
+class DebateTTSGenerator:
+    def __init__(self, api_key=None):
+        """
+        Initialize the debate TTS generator.
+        
+        Args:
+            api_key (str): OpenAI API key. If None, will use OPENAI_API_KEY environment variable.
+        """
+        self.client = OpenAI(api_key=api_key)
+        
+        # Define voice mappings for speakers
+        self.voice_config = {
+            'speaker1': 'alloy',    # Male-sounding voice
+            'speaker2': 'nova',     # Female-sounding voice
+            'default': 'echo'       # Fallback voice
+        }
+    
+    def parse_debate_text(self, debate_text):
+        """
+        Parse the debate text and identify speakers.
+        
+        Expected formats:
+        - "Speaker 1: [text]" or "Person A: [text]"
+        - "John: [text]" or "Mary: [text]"
+        - "[Speaker 1] [text]" or "[Person A] [text]"
+        
+        Args:
+            debate_text (str): The full debate conversation
+            
+        Returns:
+            list: List of tuples (speaker, text)
+        """
+        lines = debate_text.strip().split('\n')
+        speakers = []
+        speaker_map = {}
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Try different patterns to identify speakers
+            patterns = [
+                r'^([^:]+):\s*(.+)$',           # "Speaker: text"
+                r'^\[([^\]]+)\]\s*(.+)$',       # "[Speaker] text"
+                r'^(\w+(?:\s+\w+)?)\s*[-–]\s*(.+)$',  # "Speaker - text"
+            ]
+            
+            matched = False
+            for pattern in patterns:
+                match = re.match(pattern, line)
+                if match:
+                    speaker_name = match.group(1).strip()
+                    text = match.group(2).strip()
+                    
+                    # Map speaker to voice
+                    if speaker_name not in speaker_map:
+                        speaker_count = len(speaker_map)
+                        if speaker_count == 0:
+                            speaker_map[speaker_name] = 'speaker1'
+                        elif speaker_count == 1:
+                            speaker_map[speaker_name] = 'speaker2'
+                        else:
+                            speaker_map[speaker_name] = 'default'
+                    
+                    speakers.append((speaker_map[speaker_name], text))
+                    matched = True
+                    break
+            
+            if not matched:
+                # If no speaker pattern found, treat as continuation of previous speaker
+                if speakers:
+                    last_speaker = speakers[-1][0]
+                    speakers.append((last_speaker, line))
+                else:
+                    # Default to first speaker if no previous context
+                    speakers.append(('speaker1', line))
+        
+        return speakers
+    
+    def generate_speech_segment(self, text, voice):
+        """
+        Generate speech for a single text segment.
+        
+        Args:
+            text (str): Text to convert to speech
+            voice (str): Voice to use
+            
+        Returns:
+            AudioSegment: Audio segment
+        """
+        try:
+            response = self.client.audio.speech.create(
+                model="tts-1",
+                voice=self.voice_config.get(voice, 'echo'),
+                input=text
+            )
+            
+            # Convert response to AudioSegment
+            audio_data = io.BytesIO(response.content)
+            audio_segment = AudioSegment.from_mp3(audio_data)
+            
+            return audio_segment
+            
+        except Exception as e:
+            print(f"Error generating speech for text: {text[:50]}...")
+            print(f"Error: {e}")
+            return None
+    
+    def generate_debate_audio(self, debate_text, output_file="debate_output.mp3", 
+                            pause_duration=500, speaker_pause=1000):
+        """
+        Generate complete debate audio from text.
+        
+        Args:
+            debate_text (str): The full debate conversation
+            output_file (str): Output MP3 file path
+            pause_duration (int): Pause between sentences in milliseconds
+            speaker_pause (int): Pause between different speakers in milliseconds
+            
+        Returns:
+            str: Path to the generated MP3 file
+        """
+        print("Parsing debate text...")
+        speakers = self.parse_debate_text(debate_text)
+        
+        if not speakers:
+            raise ValueError("No speakers found in the debate text")
+        
+        print(f"Found {len(speakers)} speech segments")
+        
+        # Generate audio segments
+        audio_segments = []
+        current_speaker = None
+        
+        for i, (speaker, text) in enumerate(speakers):
+            print(f"Generating speech {i+1}/{len(speakers)}: {speaker}")
+            
+            # Add pause between different speakers
+            if current_speaker is not None and current_speaker != speaker:
+                silence = AudioSegment.silent(duration=speaker_pause)
+                audio_segments.append(silence)
+            
+            # Generate speech for this segment
+            audio_segment = self.generate_speech_segment(text, speaker)
+            if audio_segment:
+                audio_segments.append(audio_segment)
+                
+                # Add pause after each segment (except the last one)
+                if i < len(speakers) - 1:
+                    silence = AudioSegment.silent(duration=pause_duration)
+                    audio_segments.append(silence)
+            
+            current_speaker = speaker
+        
+        if not audio_segments:
+            raise ValueError("No audio segments were generated successfully")
+        
+        # Combine all segments
+        print("Combining audio segments...")
+        final_audio = sum(audio_segments)
+        
+        # Export to MP3
+        print(f"Exporting to {output_file}...")
+        final_audio.export(output_file, format="mp3")
+        
+        print(f"Debate audio generated successfully: {output_file}")
+        print(f"Duration: {len(final_audio) / 1000:.2f} seconds")
+        
+        return output_file
+
+def main():
+    """
+    Example usage of the DebateTTSGenerator
+    """
+    # Initialize the generator (make sure to set your OpenAI API key)
+    # Option 1: Set environment variable OPENAI_API_KEY
+    # Option 2: Pass API key directly
+    generator = DebateTTSGenerator()
+    
+    # Example debate text
+    sample_debate = """
+    Alice: I believe artificial intelligence will revolutionize healthcare by improving diagnostic accuracy and treatment outcomes.
+    
+    Bob: While AI has potential, I'm concerned about the risks of over-reliance on technology in medical decision-making.
+    
+    Alice: That's a valid concern, but consider how AI can assist doctors rather than replace them. Machine learning algorithms can analyze medical images with incredible precision.
+    
+    Bob: True, but what about patient privacy and data security? Medical AI systems require vast amounts of sensitive patient data.
+    
+    Alice: Privacy is crucial, but we can implement strong encryption and anonymization techniques. The benefits of early disease detection could save millions of lives.
+    
+    Bob: I agree the potential is enormous, but we need robust regulatory frameworks before widespread implementation.
+    """
+    
+    try:
+        # Generate the debate audio
+        output_file = generator.generate_debate_audio(
+            debate_text=sample_debate,
+            output_file="ai_healthcare_debate.mp3",
+            pause_duration=750,      # 0.75 seconds between sentences
+            speaker_pause=1200       # 1.2 seconds between speakers
+        )
+        
+        print(f"\nDebate audio saved as: {output_file}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Make sure you have set your OpenAI API key and installed required packages:")
+        print("pip install openai pydub")
+
+if __name__ == "__main__":
+    main()
